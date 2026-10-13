@@ -182,12 +182,7 @@ struct OverviewView: View {
         guard let task else { return }
         switch task.id {
         case "integration_claude":
-            let vscodeBundleId = "com.microsoft.VSCode"
-            if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == vscodeBundleId }) {
-                app.activate(options: .activateIgnoringOtherApps)
-            } else {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Visual Studio Code.app"))
-            }
+            SessionJump.open(task)
         case "integration_resend":
             NSWorkspace.shared.open(URL(string: "https://resend.com/emails")!)
         case "integration_vercel":
@@ -303,7 +298,7 @@ struct ApprovalView: View {
             CardBackground(wash: .amber)
             VStack(alignment: .leading, spacing: 5) {
                 AgentWho(task: state.focusTask, label: "needs permission")
-                CodeBlock(text: approval?.command ?? approval?.tool ?? "…")
+                ApprovalDetailBlock(text: approval.map(ApprovalDetail.text(for:)) ?? "…")
                 HStack(spacing: 8) {
                     SecondaryButton("Deny") {
                         HookServer.shared.sendApprovalDecision("deny")
@@ -326,6 +321,68 @@ struct ApprovalView: View {
             .padding(.trailing, 16)
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// What the user is about to approve, in full: never just the first line of a command,
+/// never just a tool name when the input carries a path, URL or content.
+enum ApprovalDetail {
+    static func text(for approval: ApprovalInfo) -> String {
+        guard let data = approval.inputKey.data(using: .utf8),
+              let input = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              !input.isEmpty else { return approval.command }
+        if let command = input["command"] as? String { return command }
+
+        var lines: [String] = []
+        for key in ["file_path", "notebook_path", "path", "url", "query", "pattern"] {
+            if let value = input[key] as? String { lines.append("\(key): \(value)") }
+        }
+        if let old = input["old_string"] as? String { lines.append("− \(old)") }
+        if let new = input["new_string"] as? String { lines.append("+ \(new)") }
+        if let content = input["content"] as? String { lines.append(content) }
+        if let edits = input["edits"] as? [[String: Any]] {
+            for edit in edits {
+                if let old = edit["old_string"] as? String { lines.append("− \(old)") }
+                if let new = edit["new_string"] as? String { lines.append("+ \(new)") }
+            }
+        }
+        if !lines.isEmpty { return "\(approval.tool)\n" + lines.joined(separator: "\n") }
+
+        // Unknown tool (MCP, WebFetch prompt…): show every argument.
+        let pretty = (try? JSONSerialization.data(withJSONObject: input,
+                                                   options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? approval.inputKey
+        return "\(approval.tool)\n\(pretty)"
+    }
+}
+
+/// Scrollable, selectable, never truncated: hidden text after a harmless first line stays visible.
+struct ApprovalDetailBlock: View {
+    let text: String
+
+    private var lineCount: Int { text.split(separator: "\n", omittingEmptySubsequences: false).count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ScrollView(.vertical) {
+                Text(text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+            }
+            .frame(maxHeight: 74)
+            .background(Color.white.opacity(0.07))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.06)))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .foregroundColor(Color(hex: "#E8E9EC"))
+            if lineCount > 4 || text.count > 300 {
+                Text("⚠︎ \(lineCount) lines · \(text.count) chars — scroll to read everything before Allow")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(Color(hex: "#F5A524"))
+            }
         }
     }
 }
@@ -565,13 +622,7 @@ struct FinishedView: View {
                 HStack(spacing: 8) {
                     #if !APPSTORE
                     PrimaryButton("Open terminal") {
-                        let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
-                        let activated = terminalBundleIds.compactMap { id in
-                            NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
-                        }.first.map { $0.activate(options: .activateIgnoringOtherApps) }
-                        if activated == nil {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
-                        }
+                        SessionJump.open(state.focusTask)
                         NotificationCenter.default.post(name: .islandCollapse, object: nil)
                     }
                     #endif
@@ -2042,30 +2093,7 @@ struct IntegrationCardView: View {
     }
 
     private func openVSCode() {
-        let ids = ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.vscodium.codium"]
-        let appURL = ids.compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.first
-
-        // If we have a project folder, open it directly in VS Code
-        if let cwd = task.sessionCwd, !cwd.isEmpty, let appURL = appURL {
-            NSWorkspace.shared.open(
-                [URL(fileURLWithPath: cwd)],
-                withApplicationAt: appURL,
-                configuration: .init(),
-                completionHandler: nil
-            )
-            return
-        }
-
-        // No cwd: activate running instance or launch fresh
-        if let running = ids.compactMap({ id in
-            NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
-        }).first {
-            running.activate(options: .activateIgnoringOtherApps)
-            return
-        }
-        if let appURL = appURL {
-            NSWorkspace.shared.openApplication(at: appURL, configuration: .init(), completionHandler: nil)
-        }
+        SessionJump.open(task)
     }
 
 }

@@ -5,7 +5,7 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { Ticker } from "./ticker";
-import { State, type AgentTask } from "../core/state";
+import { State, TRUNCATION_MARKER, type AgentTask } from "../core/state";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
@@ -290,9 +290,10 @@ function buildEmpty(actions: ViewActions): ViewHost {
 
 function buildApproval(actions: ViewActions): ViewHost {
   const who = h("div");
-  const code = h("div", { class: "code" });
+  const code = h("div", { class: "code approval-detail" });
+  const warn = h("div", { class: "approval-warn" });
   const row = h("div", { class: "actions" });
-  const el = h("div", { class: "view" }, card("amber", stack(116, 16, who, code, row)));
+  const el = h("div", { class: "view" }, card("amber", stack(116, 16, who, code, warn, row)));
   let rowKey = "";
   return {
     el,
@@ -302,7 +303,17 @@ function buildApproval(actions: ViewActions): ViewHost {
       // The whole point of approving here rather than in the terminal: this line
       // is the command, the file path or the URL being authorised, not just the
       // name of the tool asking.
-      code.textContent = State.pendingApproval?.command || State.pendingApproval?.tool || "…";
+      const detail = State.pendingApproval?.command || State.pendingApproval?.tool || "…";
+      if (code.textContent !== detail) {
+        code.textContent = detail;
+        code.scrollTop = 0;
+      }
+      const lineCount = detail.split("\n").length;
+      warn.textContent = detail.includes(TRUNCATION_MARKER)
+        ? "⚠ Request too long to show in full — answer in the terminal"
+        : lineCount > 4 || detail.length > 300
+          ? `⚠ ${lineCount} lines · ${detail.length} chars — scroll to read everything before Allow`
+          : "";
       // Two buttons, built once. Rebuilding them between a mouse-down and a
       // mouse-up would swallow the click, and there is nothing left to vary:
       // "Always" is gone until the remembered-rules list exists to back it.
