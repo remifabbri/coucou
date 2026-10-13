@@ -392,6 +392,12 @@ final class HookServer: @unchecked Sendable {
             return
         }
 
+        // Every event carries the session's folder: keep it current, so "Open terminal"
+        // finds the right editor window even when Coucou started mid-session.
+        if !isExternalAgent, !cwd.isEmpty, let idx = state.tasks.firstIndex(where: { $0.id == agentId }) {
+            state.tasks[idx].sessionCwd = cwd
+        }
+
         let focused = state.focusId == agentId
         // For sessions that carry no id, derive a unique key from pill + cwd so that
         // concurrent anonymous sessions are tracked independently in RecapStore.
@@ -946,8 +952,9 @@ final class HookServer: @unchecked Sendable {
         let def = PillCatalog.definition(for: id)
         let color = def?.color ?? "#C0C4CC"
         let source = def?.source ?? .agent
-        let task = AgentTask(id: id, name: projectName, color: color,
+        var task = AgentTask(id: id, name: projectName, color: color,
                              state: .idle, steps: [], source: source, isIntegration: true)
+        if !cwd.isEmpty { task.sessionCwd = cwd }
         if let mainIdx = state.tasks.firstIndex(where: { $0.id == state.mainPillId }) {
             state.tasks.insert(task, at: mainIdx + 1)
         } else {
