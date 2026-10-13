@@ -1202,40 +1202,56 @@ final class HookServer: @unchecked Sendable {
     // MARK: - Claude Code settings.json hook installer
 
     private var _pendingHooksData: Data?
+    private var _pendingHooksFingerprint: String?
+
+    private static var claudeSettingsURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
+    }
+
+    /// True for a hook command installed by Coucou (the nb-hook relay), never for the user's own hooks.
+    private static func isCoucouHookCommand(_ command: Any?) -> Bool {
+        (command as? String)?.contains("nb-hook") == true
+    }
+
+    /// Reads settings.json for a merge; refuses (instead of starting from scratch) when it is not
+    /// valid JSON or when "hooks" has an unexpected type, so the user's settings are never lost.
+    private static func readClaudeSettingsForMerge(at url: URL) throws -> [String: Any] {
+        let settings = try strictReadJSONObject(at: url, label: "~/.claude/settings.json")
+        if let raw = settings["hooks"], !(raw is [String: Any]) {
+            throw NSError(domain: "Coucou", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "~/.claude/settings.json: \"hooks\" has an unexpected type — Coucou has not touched it."
+            ])
+        }
+        return settings
+    }
 
     /// Returns preview JSON without writing — call writeClaudeHooks() to confirm.
     func previewClaudeHooks() throws -> String {
+        let url = Self.claudeSettingsURL
+        let current = FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
         let data = try buildHooksData()
+        _pendingHooksFingerprint = sha256Hex(current)
         _pendingHooksData = data
         return String(data: data, encoding: .utf8) ?? ""
     }
 
     /// Writes the hooks to disk (call after user confirms preview).
     func writeClaudeHooks() throws {
-        guard let data = _pendingHooksData else { return }
-        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-        // Backup first
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmm"
-        let stamp = formatter.string(from: Date())
-        let backupURL = settingsURL.deletingLastPathComponent()
-            .appendingPathComponent("settings.json.bak-\(stamp)")
-        try? FileManager.default.copyItem(at: settingsURL, to: backupURL)
-        try? FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(),
-                                                  withIntermediateDirectories: true)
-        try data.write(to: settingsURL, options: .atomic)
+        guard let data = _pendingHooksData, let fp = _pendingHooksFingerprint else { return }
+        let url = Self.claudeSettingsURL
+        let current = (try? Data(contentsOf: url)) ?? Data()
+        guard sha256Hex(current) == fp else {
+            throw NSError(domain: "Coucou", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "~/.claude/settings.json changed since preview. Refresh and try again."
+            ])
+        }
+        try writeJSONFile(data, to: url, suffix: "settings.json")
         _pendingHooksData = nil
+        _pendingHooksFingerprint = nil
     }
 
     private func buildHooksData() throws -> Data {
-        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-        var settings: [String: Any] = [:]
-        if let data = try? Data(contentsOf: settingsURL),
-           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            settings = parsed
-        }
+        var settings = try Self.readClaudeSettingsForMerge(at: Self.claudeSettingsURL)
         let hookPath = Self.hookScriptPath
         #if APPSTORE
         // Sandboxed apps create quarantined files; /bin/sh bypasses the quarantine flag
@@ -1255,7 +1271,7 @@ final class HookServer: @unchecked Sendable {
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
         for (event, timeout) in events {
             var existing = hooks[event] as? [[String: Any]] ?? []
-            existing.removeAll { ($0["hooks"] as? [[String: Any]])?.contains { ($0["command"] as? String)?.contains("NotchBuddy") == true || ($0["command"] as? String)?.contains("coucou") == true } ?? false }
+            existing.removeAll { ($0["hooks"] as? [[String: Any]])?.contains { Self.isCoucouHookCommand($0["command"]) } ?? false }
             existing.append(["hooks": [["type": "command", "command": quotedCmd, "timeout": timeout]]])
             hooks[event] = existing
         }
@@ -1271,19 +1287,14 @@ final class HookServer: @unchecked Sendable {
     }
 
     func uninstallClaudeHooks() throws {
-        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-        guard let data = try? Data(contentsOf: settingsURL),
-              var settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var hooks = settings["hooks"] as? [String: Any] else { return }
+        let settingsURL = Self.claudeSettingsURL
+        var settings = try Self.readClaudeSettingsForMerge(at: settingsURL)
+        guard var hooks = settings["hooks"] as? [String: Any] else { return }
 
         for key in hooks.keys {
             if var matchers = hooks[key] as? [[String: Any]] {
                 matchers.removeAll { matcher in
-                    (matcher["hooks"] as? [[String: Any]])?.contains {
-                        ($0["command"] as? String)?.contains("NotchBuddy") == true ||
-                        ($0["command"] as? String)?.contains("coucou") == true
-                    } ?? false
+                    (matcher["hooks"] as? [[String: Any]])?.contains { Self.isCoucouHookCommand($0["command"]) } ?? false
                 }
                 if matchers.isEmpty { hooks.removeValue(forKey: key) }
                 else { hooks[key] = matchers }
@@ -1291,7 +1302,7 @@ final class HookServer: @unchecked Sendable {
         }
         settings["hooks"] = hooks
         let newData = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-        try newData.write(to: settingsURL, options: .atomic)
+        try writeJSONFile(newData, to: settingsURL, suffix: "settings.json")
     }
 
     // MARK: - Claude plan status line installer
@@ -1312,18 +1323,16 @@ final class HookServer: @unchecked Sendable {
     }
 
     private var _pendingStatusLineData: Data?
+    private var _pendingStatusLineFingerprint: String?
     private var _pendingPreviousData: Data?
     private var _pendingDeletePrevious: Bool = false
 
     /// Returns a diff string (only the statusLine key: before → after) without writing anything.
     func previewStatusLine(install: Bool) throws -> String {
-        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-        var settings: [String: Any] = [:]
-        if let d = try? Data(contentsOf: settingsURL),
-           let parsed = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
-            settings = parsed
-        }
+        let settingsURL = Self.claudeSettingsURL
+        let current = FileManager.default.fileExists(atPath: settingsURL.path) ? try Data(contentsOf: settingsURL) : Data()
+        let settings = try Self.strictReadJSONObject(at: settingsURL, label: "~/.claude/settings.json")
+        _pendingStatusLineFingerprint = sha256Hex(current)
         let hookPath = Self.hookScriptPath
         let quotedPath = hookPath.replacingOccurrences(of: "\"", with: "\\\"")
         let quotedCmd = "\"\(quotedPath)\" --statusline"
@@ -1406,18 +1415,15 @@ final class HookServer: @unchecked Sendable {
 
     /// Writes settings.json and commits side effects (call after user confirms).
     func writeStatusLine() throws {
-        guard let data = _pendingStatusLineData else { return }
-        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmm"
-        let stamp = formatter.string(from: Date())
-        let backupURL = settingsURL.deletingLastPathComponent()
-            .appendingPathComponent("settings.json.bak-\(stamp)")
-        try? FileManager.default.copyItem(at: settingsURL, to: backupURL)
-        try? FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(),
-                                                  withIntermediateDirectories: true)
-        try data.write(to: settingsURL, options: .atomic)
+        guard let data = _pendingStatusLineData, let fp = _pendingStatusLineFingerprint else { return }
+        let settingsURL = Self.claudeSettingsURL
+        let current = (try? Data(contentsOf: settingsURL)) ?? Data()
+        guard sha256Hex(current) == fp else {
+            throw NSError(domain: "Coucou", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "~/.claude/settings.json changed since preview. Refresh and try again."
+            ])
+        }
+        try writeJSONFile(data, to: settingsURL, suffix: "settings.json")
         // Commit side effects only after successful write
         if let prevData = _pendingPreviousData {
             try? prevData.write(to: statusLinePreviousURL, options: .atomic)
@@ -1426,6 +1432,7 @@ final class HookServer: @unchecked Sendable {
             try? FileManager.default.removeItem(at: statusLinePreviousURL)
         }
         _pendingStatusLineData = nil
+        _pendingStatusLineFingerprint = nil
         _pendingPreviousData = nil
         _pendingDeletePrevious = false
     }
@@ -1449,27 +1456,18 @@ final class HookServer: @unchecked Sendable {
         _ = try? FileManager.default.setAttributes([.posixPermissions: 0o755 as NSNumber], ofItemAtPath: pyURL.path)
 
         // Write settings.json (with backup)
-        let settingsURL = claudeURL.appendingPathComponent("settings.json")
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmm"
-        let backupURL = claudeURL.appendingPathComponent("settings.json.bak-\(formatter.string(from: Date()))")
-        try? FileManager.default.copyItem(at: settingsURL, to: backupURL)
-        try data.write(to: settingsURL, options: .atomic)
+        try writeJSONFile(data, to: claudeURL.appendingPathComponent("settings.json"), suffix: "settings.json")
         UserDefaults.standard.set(true, forKey: "coucouHooksInstalled")
     }
 
     func uninstallClaudeHooksAppStore(claudeURL: URL) throws {
         let settingsURL = claudeURL.appendingPathComponent("settings.json")
-        guard let data = try? Data(contentsOf: settingsURL),
-              var settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var hooks = settings["hooks"] as? [String: Any] else { return }
+        var settings = try Self.readClaudeSettingsForMerge(at: settingsURL)
+        guard var hooks = settings["hooks"] as? [String: Any] else { return }
         for key in hooks.keys {
             if var matchers = hooks[key] as? [[String: Any]] {
                 matchers.removeAll { matcher in
-                    (matcher["hooks"] as? [[String: Any]])?.contains {
-                        ($0["command"] as? String)?.contains("coucou") == true ||
-                        ($0["command"] as? String)?.contains("NotchBuddy") == true
-                    } ?? false
+                    (matcher["hooks"] as? [[String: Any]])?.contains { Self.isCoucouHookCommand($0["command"]) } ?? false
                 }
                 if matchers.isEmpty { hooks.removeValue(forKey: key) }
                 else { hooks[key] = matchers }
@@ -1477,17 +1475,12 @@ final class HookServer: @unchecked Sendable {
         }
         settings["hooks"] = hooks
         let newData = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-        try newData.write(to: settingsURL, options: .atomic)
+        try writeJSONFile(newData, to: settingsURL, suffix: "settings.json")
         UserDefaults.standard.set(false, forKey: "coucouHooksInstalled")
     }
 
     private func buildHooksData(claudeURL: URL) throws -> Data {
-        let settingsURL = claudeURL.appendingPathComponent("settings.json")
-        var settings: [String: Any] = [:]
-        if let data = try? Data(contentsOf: settingsURL),
-           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            settings = parsed
-        }
+        var settings = try Self.readClaudeSettingsForMerge(at: claudeURL.appendingPathComponent("settings.json"))
         // Derive hook path from the panel-selected claudeURL (real ~/.claude, not container)
         let hookPath = claudeURL.appendingPathComponent("coucou/nb-hook").path
         let quotedCmd = "/bin/sh \"\(hookPath.replacingOccurrences(of: "\"", with: "\\\""))\""
@@ -1503,10 +1496,7 @@ final class HookServer: @unchecked Sendable {
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
         for (event, timeout) in events {
             var existing = hooks[event] as? [[String: Any]] ?? []
-            existing.removeAll { ($0["hooks"] as? [[String: Any]])?.contains {
-                ($0["command"] as? String)?.contains("coucou") == true ||
-                ($0["command"] as? String)?.contains("NotchBuddy") == true
-            } ?? false }
+            existing.removeAll { ($0["hooks"] as? [[String: Any]])?.contains { Self.isCoucouHookCommand($0["command"]) } ?? false }
             existing.append(["hooks": [["type": "command", "command": quotedCmd, "timeout": timeout]]])
             hooks[event] = existing
         }
@@ -2332,6 +2322,8 @@ function forward(event_name: string, fields: Record<string, unknown>): void {
   p.unref();
 }
 
+// tool.call must return an action; 'allow' means "proceed normally" in Amp's plugin API
+// (ampcode.com/manual/plugin-api) — Amp's own permission prompts still apply.
 export default function (amp: any): void {
   amp.on('session.start', (e: any) => { forward('SessionStart',     { session_id: e.thread?.id ?? '' }); });
   amp.on('agent.start',   (e: any) => { forward('UserPromptSubmit', { session_id: e.thread?.id ?? '' }); });

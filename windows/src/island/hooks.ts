@@ -110,14 +110,37 @@ const APPROVAL_FIELDS = [
   "prompt", // Task
 ] as const;
 
+/**
+ * Everything being approved, never just the first field: the full command,
+ * the target plus the content written for Write/Edit, every argument otherwise.
+ */
 function approvalTarget(tool: string, input: Record<string, unknown>): string {
+  if (typeof input.command === "string" && input.command.trim()) return input.command;
+  const lines: string[] = [];
   for (const field of APPROVAL_FIELDS) {
     const value = input[field];
-    if (typeof value === "string" && value.trim()) {
-      return `${tool} · ${value.trim()}`;
+    if (field !== "command" && typeof value === "string" && value.trim()) {
+      lines.push(`${field}: ${value}`);
     }
   }
-  return tool;
+  const str = (v: unknown) => (typeof v === "string" ? v : null);
+  const old = str(input.old_string);
+  const neu = str(input.new_string);
+  if (old !== null) lines.push(`− ${old}`);
+  if (neu !== null) lines.push(`+ ${neu}`);
+  const content = str(input.content);
+  if (content !== null) lines.push(content);
+  if (Array.isArray(input.edits)) {
+    for (const e of input.edits as Record<string, unknown>[]) {
+      const o = str(e?.old_string);
+      const n = str(e?.new_string);
+      if (o !== null) lines.push(`− ${o}`);
+      if (n !== null) lines.push(`+ ${n}`);
+    }
+  }
+  if (lines.length) return `${tool}\n${lines.join("\n")}`;
+  // Unknown tool (MCP…): show every argument.
+  return Object.keys(input).length ? `${tool}\n${JSON.stringify(input, null, 2)}` : tool;
 }
 
 function upsert(projectName: string, cwd: string) {

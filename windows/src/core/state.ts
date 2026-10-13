@@ -25,8 +25,12 @@ export interface ApprovalInfo {
   requestId: string;
   sessionId: string;
   tool: string;
+  /** Full detail of what is being approved (see approvalTarget in island/hooks.ts). */
   command: string;
 }
+
+/** Appended by coucou-hook to any string it had to cap. Must match hook/src/main.rs. */
+export const TRUNCATION_MARKER = "…[coucou: truncated]";
 
 export interface ChatMessage {
   id: number;

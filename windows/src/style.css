@@ -625,6 +625,24 @@ body {
   user-select: text;
 }
 
+/* Approval: never truncated, so text hidden after a harmless first line stays visible. */
+.code.approval-detail {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  text-overflow: clip;
+  max-height: 74px;
+}
+
+.approval-warn {
+  font-size: 10.5px;
+  color: #f5a524;
+}
+
+.approval-warn:empty {
+  display: none;
+}
+
 .stack {
   position: relative;
   z-index: 1;

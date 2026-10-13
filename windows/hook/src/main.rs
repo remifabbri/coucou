@@ -33,6 +33,8 @@ const DROPPED_FIELDS: &[&str] = &["tool_response", "transcript_path"];
 /// Longest string forwarded for any single field; the island truncates to far
 /// less than this anyway.
 const MAX_FIELD_LEN: usize = 2_000;
+/// Appended to a capped string. Must match TRUNCATION_MARKER in src/core/state.ts.
+const TRUNCATION_MARKER: &str = "…[coucou: truncated]";
 
 #[cfg(windows)]
 mod win;
@@ -179,7 +181,8 @@ fn truncate_strings(value: &mut serde_json::Value) {
                     end -= 1;
                 }
                 s.truncate(end);
-                s.push('…');
+                // Explicit marker: the approval card warns that what it shows is not everything.
+                s.push_str(TRUNCATION_MARKER);
             }
         }
         serde_json::Value::Array(items) => items.iter_mut().for_each(truncate_strings),
@@ -250,7 +253,7 @@ mod tests {
         let mut v = serde_json::json!({ "tool_input": { "content": "é".repeat(4000) } });
         truncate_strings(&mut v);
         let s = v["tool_input"]["content"].as_str().unwrap();
-        assert!(s.len() <= MAX_FIELD_LEN + 4);
-        assert!(s.ends_with('…'));
+        assert!(s.len() <= MAX_FIELD_LEN + TRUNCATION_MARKER.len());
+        assert!(s.ends_with(TRUNCATION_MARKER));
     }
 }
