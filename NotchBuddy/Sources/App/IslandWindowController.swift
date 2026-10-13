@@ -545,33 +545,7 @@ final class IslandWindowController: NSWindowController {
             NotificationCenter.default.post(name: .triggerEmote, object: BotEmote.annoyed)
             return
         }
-        // Sessions run in an editor's integrated terminal: open that editor on the
-        // session's folder (launching it if it was closed), not a standalone terminal.
-        let editorBundleIds: [String]
-        switch task.id {
-        case "integration_claude": editorBundleIds = ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.vscodium.codium"]
-        case "agent_cursor":       editorBundleIds = ["com.todesktop.230313mzl4w4u92"]
-        default:                   editorBundleIds = []
-        }
-        if let appURL = editorBundleIds.compactMap({ NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }).first {
-            if let cwd = task.sessionCwd, !cwd.isEmpty {
-                NSWorkspace.shared.open([URL(fileURLWithPath: cwd)], withApplicationAt: appURL,
-                                        configuration: .init(), completionHandler: nil)
-            } else {
-                NSWorkspace.shared.openApplication(at: appURL, configuration: .init(), completionHandler: nil)
-            }
-            collapse()
-            return
-        }
-        let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2",
-                                 "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
-        let activated = terminalBundleIds.compactMap { id in
-            NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
-        }.first.map { $0.activate(options: .activateIgnoringOtherApps) }
-        if activated == nil {
-            NSWorkspace.shared.open(
-                URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
-        }
+        SessionJump.open(task)
         collapse()
     }
 
